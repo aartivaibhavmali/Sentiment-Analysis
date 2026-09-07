@@ -273,4 +273,23 @@ if analyze:
         # ----------------------------------------------------
         # PROBABILITY GRAPH (SHOW ONLY PREDICTED SENTIMENT)
         # ----------------------------------------------------
-        if confidence_df is not None
+        if confidence_df is not None:
+            st.markdown("---")
+            st.subheader("📊 Probability Graph")
+            
+            # Filter the dataframe to ONLY show the predicted sentiment
+            result_row = confidence_df[confidence_df["Sentiment"] == prediction]
+
+            for _, row in result_row.iterrows():
+                prob = row["Probability"]
+                st.write(f"**{sentiment} Sentiment Accuracy:** {prob:.2f}%")
+                st.progress(prob / 100)
+
+        # ----------------------------------------------------
+        # STATISTICS
+        # ----------------------------------------------------
+        st.markdown("---")
+        st.subheader("📝 Review Statistics")
+        c1, c2 = st.columns(2)
+        c1.metric("Word Count", len(review.split()))
+        c2.metric("Character Count", len(review))
