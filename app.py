@@ -52,31 +52,37 @@ st.markdown("""
     border-radius: 15px;
     text-align: center;
     margin-top: 20px;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
 }
 
 .positive {
     background-color: #e8f7ee;
     border: 2px solid #28a745;
+    color: #155724;
 }
 
 .negative {
     background-color: #fdecec;
     border: 2px solid #dc3545;
+    color: #721c24;
 }
 
 .neutral {
     background-color: #fff8df;
     border: 2px solid #f0ad4e;
+    color: #856404;
 }
 
 .result-text {
     font-size: 32px;
     font-weight: 700;
+    margin-bottom: 10px;
 }
 
 .confidence-text {
-    font-size: 22px;
-    margin-top: 10px;
+    font-size: 18px;
+    margin-top: 5px;
+    opacity: 0.9;
 }
 
 .metric-card {
@@ -93,6 +99,14 @@ st.markdown("""
     margin-top: 40px;
 }
 
+/* Custom style for probability bars */
+.prob-label {
+    display: flex;
+    justify-content: space-between;
+    font-weight: 600;
+    margin-bottom: 5px;
+    font-size: 14px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -103,8 +117,11 @@ st.markdown("""
 
 @st.cache_resource
 def load_model():
-
-    model = joblib.load("sentiment_model.pkl")
+    try:
+        model = joblib.load("sentiment_model.pkl")
+    except Exception as e:
+        st.error(f"Error loading model: {e}")
+        return None, None
 
     try:
         metrics = joblib.load("sentiment_metrics.pkl")
@@ -116,13 +133,19 @@ def load_model():
 
 model, metrics = load_model()
 
+# Stop execution if model failed to load
+if model is None:
+    st.stop()
+
 
 # ============================================================
 # TEXT CLEANING
 # ============================================================
 
 def clean_text(text):
-
+    if not text:
+        return ""
+    
     text = str(text).lower()
 
     # Remove HTML
@@ -141,31 +164,40 @@ def clean_text(text):
 
 
 # ============================================================
-# CONFIDENCE CALCULATION
+# CONFIDENCE CALCULATION (PROBABILITY)
 # ============================================================
 
 def calculate_confidence(model, text):
-
+    """
+    Calculates probability/confidence for each class.
+    Uses decision_function + Softmax for SVMs where predict_proba might not be available.
+    """
     try:
-
-        scores = model.decision_function([text])
-
-        scores = np.asarray(scores).flatten()
-
-        # Softmax transformation
-        exp_scores = np.exp(scores - np.max(scores))
-        probabilities = exp_scores / exp_scores.sum()
-
-        classes = model.classes_
+        # Try predict_proba first (e.g. for Logistic Regression or calibrated SVM)
+        if hasattr(model, "predict_proba"):
+            probabilities = model.predict_proba([text])[0]
+            classes = model.classes_
+        else:
+            # Fallback for Linear SVMs using decision_function
+            scores = model.decision_function([text])
+            scores = np.asarray(scores).flatten()
+            
+            # Apply Softmax to get pseudo-probabilities
+            exp_scores = np.exp(scores - np.max(scores))
+            probabilities = exp_scores / exp_scores.sum()
+            classes = model.classes_
 
         confidence_df = pd.DataFrame({
             "Sentiment": classes,
-            "Confidence": probabilities * 100
+            "Probability": probabilities * 100  # Convert to percentage
         })
 
+        # Sort by probability descending
+        confidence_df = confidence_df.sort_values(by="Probability", ascending=False)
         return confidence_df
 
-    except Exception:
+    except Exception as e:
+        # st.error(f"Error calculating confidence: {e}") # Optional: Hide to keep UI clean
         return None
 
 
@@ -317,25 +349,35 @@ if analyze:
 
             # Prediction
             prediction = model.predict([cleaned_review])[0]
-
+            
+            # Normalize prediction to string for display
+            # If model returns integers, we might need a map, 
+            # but usually scikit-learn returns class labels if trained on strings.
+            # We assume prediction is the label (e.g., 'positive' or 'neutral')
             sentiment = str(prediction).capitalize()
+            
+            # Ensure sentiment matches one of the 3 expected classes for CSS
+            if sentiment not in ["Positive", "Negative", "Neutral"]:
+                # Fallback if model returns unexpected integers (0,1,2)
+                mapping = {0: "Negative", 1: "Neutral", 2: "Positive"} # Common order
+                sentiment = mapping.get(prediction, "Neutral")
+                prediction = sentiment # Update prediction for lookup
 
-            # Confidence
+            # Confidence / Probability
             confidence_df = calculate_confidence(
                 model,
                 cleaned_review
             )
 
+            predicted_confidence = 0.0
             if confidence_df is not None:
-
-                predicted_confidence = confidence_df.loc[
-                    confidence_df["Sentiment"] == prediction,
-                    "Confidence"
-                ].iloc[0]
-
-            else:
-
-                predicted_confidence = None
+                # Find confidence for the predicted class
+                # Note: We compare exact string match. Ensure prediction type matches df type.
+                row = confidence_df[confidence_df["Sentiment"] == prediction]
+                if not row.empty:
+                    predicted_confidence = row.iloc[0]["Probability"]
+                else:
+                    predicted_confidence = None
 
 
             # =================================================
@@ -346,86 +388,67 @@ if analyze:
 
             st.subheader("🎯 Prediction Result")
 
+            # Determine CSS class based on sentiment
+            css_class = sentiment.lower() if sentiment.lower() in ["positive", "negative", "neutral"] else "neutral"
 
-            if sentiment == "Positive":
+            # Format confidence score safely
+            conf_display = f"{predicted_confidence:.2f}%" if predicted_confidence is not None else "N/A"
 
-                st.markdown(
-                    f"""
-                    <div class="result-box positive">
-                        <div class="result-text">
-                            😊 Positive
-                        </div>
-                        <div class="confidence-text">
-                            Model Confidence:
-                            <b>{predicted_confidence:.2f}%</b>
-                        </div>
+            st.markdown(
+                f"""
+                <div class="result-box {css_class}">
+                    <div class="result-text">
+                        {{"😊 Positive" if sentiment == "Positive" else "😞 Negative" if sentiment == "Negative" else "😐 Neutral"}}
                     </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-            elif sentiment == "Negative":
-
-                st.markdown(
-                    f"""
-                    <div class="result-box negative">
-                        <div class="result-text">
-                            😞 Negative
-                        </div>
-                        <div class="confidence-text">
-                            Model Confidence:
-                            <b>{predicted_confidence:.2f}%</b>
-                        </div>
+                    <div class="confidence-text">
+                        Model Confidence: 
+                        <b>{conf_display}</b>
                     </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-            else:
-
-                st.markdown(
-                    f"""
-                    <div class="result-box neutral">
-                        <div class="result-text">
-                            😐 Neutral
-                        </div>
-                        <div class="confidence-text">
-                            Model Confidence:
-                            <b>{predicted_confidence:.2f}%</b>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
 
             # =================================================
-            # CONFIDENCE BREAKDOWN
+            # PROBABILITY OF ACCURACY (NEW FEATURE)
             # =================================================
-
+            
             if confidence_df is not None:
-
                 st.markdown("---")
-
-                st.subheader(
-                    "📈 Sentiment Confidence Breakdown"
-                )
-
-                display_df = confidence_df.copy()
-
-                display_df["Confidence"] = display_df[
-                    "Confidence"
-                ].round(2)
-
-                st.bar_chart(
-                    display_df.set_index("Sentiment")
-                )
-
-                st.dataframe(
-                    display_df,
-                    use_container_width=True,
-                    hide_index=True
-                )
+                st.subheader("📊 Probability of Accuracy (Breakdown)")
+                
+                st.write("The model's confidence levels for all possible sentiments:")
+                
+                # Create a progress bar for each sentiment
+                for _, row in confidence_df.iterrows():
+                    label = str(row["Sentiment"]).capitalize()
+                    prob = row["Probability"]
+                    
+                    # Color logic for progress bar
+                    if label == "Positive":
+                        bar_color = "green"
+                    elif label == "Negative":
+                        bar_color = "red"
+                    else:
+                        bar_color = "orange"
+                        
+                    st.markdown(
+                        f"""
+                        <div class="prob-label">
+                            <span>{label}</span>
+                            <span>{prob:.2f}%</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+                    st.progress(prob / 100)
+                    
+                # Also show the dataframe for clarity
+                with st.expander("View Raw Probability Data"):
+                    display_df = confidence_df.copy()
+                    display_df["Probability"] = display_df["Probability"].round(2)
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
             # =================================================
@@ -442,32 +465,20 @@ if analyze:
             stat1, stat2, stat3 = st.columns(3)
 
             with stat1:
-                st.metric(
-                    "Words",
-                    word_count
-                )
+                st.metric("Words", word_count)
 
             with stat2:
-                st.metric(
-                    "Characters",
-                    character_count
-                )
+                st.metric("Characters", character_count)
 
             with stat3:
-                st.metric(
-                    "Clean Words",
-                    len(cleaned_review.split())
-                )
+                st.metric("Clean Words", len(cleaned_review.split()))
 
 
             # =================================================
             # CLEANED TEXT
             # =================================================
 
-            with st.expander(
-                "🔎 View Preprocessed Text"
-            ):
-
+            with st.expander("🔎 View Preprocessed Text"):
                 st.write(cleaned_review)
 
 
